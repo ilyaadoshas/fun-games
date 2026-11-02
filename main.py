@@ -1,399 +1,878 @@
-import math
-import random
-from array import array
 
 import pygame
+import random
+import json
+import os
+from datetime import datetime
 
-pygame.mixer.pre_init(22050, -16, 1, 512)
 pygame.init()
 
-# ---------- تنظیمات ----------
-W, H = 600, 650
-TOP = 70                     # نوار بالای صفحه
-GRID = 560                   # اندازه‌ی ناحیه‌ی کارت‌ها
-HIDE_DELAY = 800             # مدت نمایش دو کارت اشتباه (میلی‌ثانیه)
+# ==================================================
+# SETTINGS
+# ==================================================
+
+W, H = 700, 800
+GRID = 660
+TOP = 120
+HIDE_DELAY = 800
 
 screen = pygame.display.set_mode((W, H))
 pygame.display.set_caption("Memory Match")
 clock = pygame.time.Clock()
-font = pygame.font.SysFont(None, 36)
-small_font = pygame.font.SysFont(None, 24)
-big_font = pygame.font.SysFont(None, 64)
 
-BG = (30, 30, 30)
-BACK = (60, 90, 160)
-BACK_BORDER = (90, 130, 210)
+font = pygame.font.SysFont("Arial", 30)
+small_font = pygame.font.SysFont("Arial", 21)
+big_font = pygame.font.SysFont("Arial", 58)
+name_font = pygame.font.SysFont("Arial", 28)
+
+BG = (25, 27, 38)
+BACK = (55, 85, 145)
+BACK_BORDER = (100, 145, 220)
 FACE = (245, 245, 245)
-MATCHED = (60, 60, 60)
+MATCHED = (65, 75, 85)
 WHITE = (255, 255, 255)
-GRAY = (160, 160, 160)
+GRAY = (170, 175, 190)
+GREEN = (65, 210, 130)
+RED = (240, 80, 80)
+GOLD = (255, 195, 65)
 
-# ۱۲ شکل (برای بزرگ‌ترین حالت، ۵×۵، به ۱۲ جفت نیاز داریم)
-SYMBOLS = [
-    ("circle",   (230, 70, 70)),
-    ("square",   (0, 170, 110)),
-    ("triangle", (240, 180, 50)),
-    ("diamond",  (150, 80, 200)),
-    ("plus",     (30, 140, 230)),
-    ("ring",     (240, 120, 40)),
-    ("star",     (220, 60, 150)),
-    ("hexagon",  (40, 180, 180)),
-    ("cross",    (110, 110, 125)),
-    ("heart",    (200, 30, 60)),
-    ("bolt",     (210, 160, 0)),
-    ("pentagon", (100, 170, 50)),
+# ==================================================
+# EMOJIS
+# ==================================================
+
+EMOJIS = [
+    "🐶", "🐱", "🐭", "🐹", "🐰",
+    "🦊", "🐻", "🐼", "🐨", "🐯",
+    "🦁", "🐮", "🐷", "🐸", "🐵",
+    "🐔", "🐧", "🐦", "🦆", "🦅",
+    "🦉", "🦇", "🐺", "🐗", "🐴",
+    "🦄", "🐝", "🦋", "🐌", "🐞",
+    "🍎", "🍌", "🍇", "🍉", "🍓",
+    "🍒", "🍍", "🥝", "🍑", "🥑",
+    "🚗", "🚕", "🚀", "✈️", "🚁",
+    "🚲", "🏎️", "🚂", "🚢", "🛸"
 ]
 
-# =====================================================
-#                      صدا
-# =====================================================
-# همه‌ی صداها با کد ساخته می‌شن، پس به هیچ فایل صوتی نیاز نیست.
-try:
-    AUDIO = pygame.mixer.get_init() is not None
-except pygame.error:
-    AUDIO = False
+# ==================================================
+# DIFFICULTIES
+# ==================================================
 
-if AUDIO:
-    RATE, _, CHANNELS = pygame.mixer.get_init()
-else:
-    RATE, CHANNELS = 22050, 1
+SIZES = [4, 6, 10]
 
-_tone_cache = {}
+TIME_LIMITS = {
+    4: 60,
+    6: 120,
+    10: 300
+}
 
+# ==================================================
+# LEADERBOARD SYSTEM
+# ==================================================
 
-def tone(freq, dur, vol=0.4, decay=True):
-    """یه نت ساده (موج سینوسی) برمی‌گردونه."""
-    key = (freq, dur, vol, decay)
-    if key in _tone_cache:
-        return _tone_cache[key]
-    n = int(RATE * dur)
-    attack = max(1, int(RATE * 0.005))
-    out = []
-    for i in range(n):
-        env = min(1.0, i / attack)
-        if decay:
-            env *= 1 - i / n
-        ph = 2 * math.pi * freq * i / RATE
-        out.append(vol * env * (math.sin(ph) + 0.25 * math.sin(2 * ph)))
-    _tone_cache[key] = out
-    return out
+LEADERBOARD_FILE = "leaderboard.json"
 
+def load_leaderboard():
 
-def sweep(f0, f1, dur, vol=0.25):
-    """صدای لغزنده (از فرکانس f0 به f1) برای صدای اشتباه."""
-    n = int(RATE * dur)
-    out, ph = [], 0.0
-    for i in range(n):
-        ph += 2 * math.pi * (f0 + (f1 - f0) * i / n) / RATE
-        out.append(vol * (1 - i / n) * (1.0 if math.sin(ph) >= 0 else -1.0))
-    return out
+    if not os.path.exists(LEADERBOARD_FILE):
+        return {"4": [], "6": [], "10": []}
+
+    try:
+        with open(LEADERBOARD_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        for n in SIZES:
+            data.setdefault(str(n), [])
+
+        return data
+
+    except (json.JSONDecodeError, OSError):
+        return {"4": [], "6": [], "10": []}
 
 
-def mix(parts, total):
-    """چند صدا رو روی هم، با زمان شروع مشخص، ترکیب می‌کنه."""
-    buf = [0.0] * int(RATE * total)
-    for start, samples in parts:
-        o = int(RATE * start)
-        for i, s in enumerate(samples):
-            if o + i < len(buf):
-                buf[o + i] += s
-    return buf
+leaderboard = load_leaderboard()
 
 
-def to_sound(samples, volume=1.0):
-    if not AUDIO:
-        return None
-    data = array("h")
-    for s in samples:
-        v = int(max(-1.0, min(1.0, s)) * 32767)
-        for _ in range(CHANNELS):
-            data.append(v)
-    snd = pygame.mixer.Sound(buffer=data.tobytes())
-    snd.set_volume(volume)
-    return snd
+def save_leaderboard():
+
+    with open(LEADERBOARD_FILE, "w", encoding="utf-8") as f:
+        json.dump(
+            leaderboard,
+            f,
+            ensure_ascii=False,
+            indent=4
+        )
 
 
-def build_music():
-    c4, d4, e4, g4, a4 = 261.63, 293.66, 329.63, 392.00, 440.00
-    c5, d5, e5 = 523.25, 587.33, 659.25
-    melody = [
-        e4, g4, c5, g4,   a4, c5, e5, c5,   d5, c5, a4, g4,   g4, e4, d4, c4,
-        c5, e5, d5, c5,   a4, c5, a4, e4,   d4, g4, a4, d5,   c5, g4, e4, c4,
-    ]
-    bass = [130.81, 110.0, 98.0, 130.81, 130.81, 110.0, 98.0, 130.81]
-    note = 0.3
-    parts = []
-    for i, f in enumerate(melody):
-        parts.append((i * note, tone(f, note, 0.30)))
-    for i, f in enumerate(bass):
-        parts.append((i * note * 4, tone(f, note * 4, 0.22)))
-    return to_sound(mix(parts, len(melody) * note), 0.25)
+def add_score(name, size, elapsed, moves):
+
+    key = str(size)
+
+    record = {
+        "name": name,
+        "time": elapsed,
+        "moves": moves,
+        "date": datetime.now().strftime("%Y-%m-%d %H:%M")
+    }
+
+    leaderboard[key].append(record)
+
+    # زمان کمتر، سپس حرکت کمتر
+    leaderboard[key].sort(
+        key=lambda x: (x["time"], x["moves"])
+    )
+
+    # فقط 10 رکورد برتر
+    leaderboard[key] = leaderboard[key][:10]
+
+    save_leaderboard()
 
 
-if AUDIO:
-    SND_FLIP = to_sound(tone(700, 0.07, 0.4), 0.6)
-    SND_MATCH = to_sound(mix([(0.00, tone(523.25, 0.15)),
-                              (0.12, tone(659.25, 0.15)),
-                              (0.24, tone(783.99, 0.30))], 0.6), 0.7)
-    SND_WRONG = to_sound(sweep(300, 140, 0.35), 0.7)
-    SND_WIN = to_sound(mix([(i * 0.15, tone(f, 0.35))
-                            for i, f in enumerate([523.25, 659.25, 783.99, 1046.5, 1318.5])], 1.2), 0.8)
-    MUSIC = build_music()
-    MUSIC.play(loops=-1)
-else:
-    SND_FLIP = SND_MATCH = SND_WRONG = SND_WIN = MUSIC = None
+# ==================================================
+# GAME VARIABLES
+# ==================================================
 
-music_on = True
+state = "menu"
 
+player_name = ""
+name_active = True
 
-def play(snd):
-    if snd:
-        snd.play()
+N = 4
+GAP = 8
+CARD = 100
+X0 = 20
 
-
-def toggle_music():
-    global music_on
-    music_on = not music_on
-    if MUSIC:
-        MUSIC.set_volume(0.25 if music_on else 0.0)
-
-
-# =====================================================
-#                      رسم شکل‌ها
-# =====================================================
-def draw_symbol(kind, color, rect):
-    cx, cy = rect.center
-    s = rect.width
-    r = int(s * 0.27)
-    if kind == "circle":
-        pygame.draw.circle(screen, color, (cx, cy), r)
-    elif kind == "ring":
-        pygame.draw.circle(screen, color, (cx, cy), r, max(4, int(s * 0.08)))
-    elif kind == "square":
-        pygame.draw.rect(screen, color, (cx - r, cy - r, 2 * r, 2 * r), border_radius=6)
-    elif kind == "triangle":
-        pygame.draw.polygon(screen, color, [(cx, cy - r), (cx - r, cy + r), (cx + r, cy + r)])
-    elif kind == "diamond":
-        d = int(r * 1.15)
-        pygame.draw.polygon(screen, color, [(cx, cy - d), (cx + r, cy), (cx, cy + d), (cx - r, cy)])
-    elif kind == "plus":
-        t = r // 2
-        pygame.draw.rect(screen, color, (cx - t, cy - r, 2 * t, 2 * r))
-        pygame.draw.rect(screen, color, (cx - r, cy - t, 2 * r, 2 * t))
-    elif kind == "cross":
-        w = max(5, int(s * 0.1))
-        pygame.draw.line(screen, color, (cx - r, cy - r), (cx + r, cy + r), w)
-        pygame.draw.line(screen, color, (cx + r, cy - r), (cx - r, cy + r), w)
-    elif kind == "star":
-        pts = []
-        for i in range(10):
-            ang = -math.pi / 2 + i * math.pi / 5
-            rad = r * 1.2 if i % 2 == 0 else r * 1.2 * 0.45
-            pts.append((cx + rad * math.cos(ang), cy + rad * math.sin(ang)))
-        pygame.draw.polygon(screen, color, pts)
-    elif kind == "hexagon":
-        pts = [(cx + r * 1.1 * math.cos(math.pi / 3 * i), cy + r * 1.1 * math.sin(math.pi / 3 * i)) for i in range(6)]
-        pygame.draw.polygon(screen, color, pts)
-    elif kind == "pentagon":
-        pts = [(cx + r * 1.15 * math.cos(-math.pi / 2 + 2 * math.pi / 5 * i),
-                cy + r * 1.15 * math.sin(-math.pi / 2 + 2 * math.pi / 5 * i)) for i in range(5)]
-        pygame.draw.polygon(screen, color, pts)
-    elif kind == "heart":
-        rr = int(r * 0.55)
-        y = cy - rr // 2
-        pygame.draw.circle(screen, color, (cx - rr, y), rr)
-        pygame.draw.circle(screen, color, (cx + rr, y), rr)
-        pygame.draw.polygon(screen, color, [(cx - 2 * rr + 1, y + 2), (cx + 2 * rr - 1, y + 2),
-                                            (cx, cy + int(r * 1.15))])
-    elif kind == "bolt":
-        pts = [(0.2, -1.1), (-0.6, 0.1), (-0.05, 0.1), (-0.2, 1.1), (0.6, -0.15), (0.05, -0.15)]
-        pygame.draw.polygon(screen, color, [(cx + px * r, cy + py * r) for px, py in pts])
-
-
-# =====================================================
-#                    چیدمان و وضعیت
-# =====================================================
-N, GAP, CARD, X0 = 4, 15, 120, 20
 cards = []
-first = second = None
-hide_at = 0
+
+first = None
+second = None
+
 moves = 0
 start_time = 0
 end_time = None
-state = "menu"               # "menu" یا "play"
 
-SIZES = [2, 4, 5]
-BUTTONS = [pygame.Rect((W - 300) // 2, 230 + i * 95, 300, 70) for i in range(len(SIZES))]
+time_limit = 60
+game_result = None
+score_saved = False
 
+hide_at = 0
+
+# ==================================================
+# BUTTONS
+# ==================================================
+
+name_box = pygame.Rect(150, 220, 400, 55)
+
+difficulty_buttons = {
+    4: pygame.Rect(180, 330, 340, 65),
+    6: pygame.Rect(180, 420, 340, 65),
+    10: pygame.Rect(180, 510, 340, 65)
+}
+
+leaderboard_button = pygame.Rect(180, 620, 340, 60)
+
+# ==================================================
+# LAYOUT
+# ==================================================
 
 def setup_layout(n):
+
     global N, GAP, CARD, X0
+
     N = n
-    GAP = 15 if n <= 4 else 10
+
+    GAP = 15 if n == 4 else (8 if n == 6 else 4)
+
     CARD = (GRID - GAP * (n - 1)) // n
+
     X0 = (W - (n * CARD + GAP * (n - 1))) // 2
 
 
 def card_rect(i):
-    r, c = divmod(i, N)
-    return pygame.Rect(X0 + c * (CARD + GAP), TOP + r * (CARD + GAP), CARD, CARD)
+
+    row, col = divmod(i, N)
+
+    return pygame.Rect(
+        X0 + col * (CARD + GAP),
+        TOP + row * (CARD + GAP),
+        CARD,
+        CARD
+    )
 
 
-def new_game(n=None):
-    global cards, first, second, hide_at, moves, start_time, end_time
-    if n:
-        setup_layout(n)
+# ==================================================
+# NEW GAME
+# ==================================================
+
+def new_game(n):
+
+    global cards, first, second
+    global moves, start_time, end_time
+    global time_limit, game_result
+    global hide_at, score_saved
+
+    setup_layout(n)
+
     pairs = (N * N) // 2
-    deck = SYMBOLS[:pairs] * 2
+
+    deck = EMOJIS[:pairs] * 2
+
     random.shuffle(deck)
-    cards = [{"kind": k, "color": c, "revealed": False, "matched": False} for k, c in deck]
-    if (N * N) % 2 == 1:                         # تعداد خانه‌ها فرده (۵×۵): خونه‌ی وسط خالی می‌مونه
-        cards.insert((N * N) // 2, None)
-    first = second = None
-    hide_at = 0
+
+    cards = [
+        {
+            "emoji": emoji,
+            "revealed": False,
+            "matched": False
+        }
+        for emoji in deck
+    ]
+
+    first = None
+    second = None
+
     moves = 0
+
     start_time = pygame.time.get_ticks()
     end_time = None
 
+    time_limit = TIME_LIMITS[N]
+
+    game_result = None
+    hide_at = 0
+    score_saved = False
+
+
+def start_game(n):
+
+    global state
+
+    if not player_name.strip():
+        return
+
+    new_game(n)
+
+    state = "play"
+
+
+# ==================================================
+# CARD LOGIC
+# ==================================================
 
 def all_matched():
-    return all(c is None or c["matched"] for c in cards)
+
+    return all(c["matched"] for c in cards)
 
 
 def click_card(i):
-    global first, second, hide_at, moves, end_time
+
+    global first, second
+    global moves, hide_at
+    global end_time, game_result
+    global score_saved
+
     card = cards[i]
-    if card is None or card["revealed"] or card["matched"] or second is not None:
+
+    if (
+        card["revealed"]
+        or card["matched"]
+        or second is not None
+    ):
         return
 
     card["revealed"] = True
-    play(SND_FLIP)
+
     if first is None:
+
         first = i
         return
 
     second = i
     moves += 1
-    if cards[first]["kind"] == cards[second]["kind"]:
-        cards[first]["matched"] = cards[second]["matched"] = True
-        first = second = None
+
+    if cards[first]["emoji"] == cards[second]["emoji"]:
+
+        cards[first]["matched"] = True
+        cards[second]["matched"] = True
+
+        first = None
+        second = None
+
         if all_matched():
+
             end_time = pygame.time.get_ticks()
-            play(SND_WIN)
-        else:
-            play(SND_MATCH)
+            game_result = "win"
+
+            save_score_once()
+
     else:
-        play(SND_WRONG)
+
         hide_at = pygame.time.get_ticks() + HIDE_DELAY
 
 
-# =====================================================
-#                        رسم صفحه‌ها
-# =====================================================
-def draw_centered(text, f, color, y):
-    surf = f.render(text, True, color)
-    screen.blit(surf, surf.get_rect(center=(W // 2, y)))
+# ==================================================
+# SAVE SCORE
+# ==================================================
 
+def save_score_once():
+
+    global score_saved
+
+    if score_saved:
+        return
+
+    elapsed = (
+        pygame.time.get_ticks() - start_time
+    ) // 1000
+
+    add_score(
+        player_name.strip(),
+        N,
+        elapsed,
+        moves
+    )
+
+    score_saved = True
+
+
+# ==================================================
+# DRAW HELPERS
+# ==================================================
+
+def draw_centered(text, f, color, y):
+
+    surface = f.render(str(text), True, color)
+
+    screen.blit(
+        surface,
+        surface.get_rect(center=(W // 2, y))
+    )
+
+
+def draw_text(text, x, y, color=WHITE, f=None):
+
+    if f is None:
+        f = font
+
+    surface = f.render(str(text), True, color)
+
+    screen.blit(surface, (x, y))
+
+
+def draw_emoji(emoji, rect):
+
+    size = max(14, int(CARD * 0.58))
+
+    emoji_font = pygame.font.SysFont(
+        "Segoe UI Emoji",
+        size
+    )
+
+    surface = emoji_font.render(emoji, True, WHITE)
+
+    screen.blit(
+        surface,
+        surface.get_rect(center=rect.center)
+    )
+
+
+# ==================================================
+# MENU
+# ==================================================
 
 def draw_menu():
-    screen.fill(BG)
-    draw_centered("Memory Match", big_font, WHITE, 100)
-    draw_centered("Choose the board size", font, GRAY, 170)
-    mouse = pygame.mouse.get_pos()
-    for n, rect in zip(SIZES, BUTTONS):
-        hover = rect.collidepoint(mouse)
-        pygame.draw.rect(screen, BACK_BORDER if hover else BACK, rect, border_radius=14)
-        pygame.draw.rect(screen, WHITE, rect, 3, border_radius=14)
-        draw_centered(f"{n} x {n}", font, WHITE, rect.centery)
-    draw_centered("(or press 2, 4 or 5)", small_font, GRAY, 540)
-    draw_centered("5 x 5 has 25 cells, so the center cell stays empty", small_font, GRAY, 570)
 
+    screen.fill(BG)
+
+    draw_centered(
+        "MEMORY MATCH",
+        big_font,
+        WHITE,
+        100
+    )
+
+    draw_centered(
+        "Enter your name",
+        font,
+        GRAY,
+        180
+    )
+
+    # Name input
+    color = GREEN if name_active else BACK_BORDER
+
+    pygame.draw.rect(
+        screen,
+        (40, 43, 58),
+        name_box,
+        border_radius=10
+    )
+
+    pygame.draw.rect(
+        screen,
+        color,
+        name_box,
+        2,
+        border_radius=10
+    )
+
+    shown_name = player_name if player_name else "Your name..."
+
+    draw_centered(
+        shown_name,
+        name_font,
+        WHITE if player_name else GRAY,
+        name_box.centery
+    )
+
+    draw_centered(
+        "Choose difficulty",
+        font,
+        GRAY,
+        295
+    )
+
+    names = {
+        4: "EASY  -  4 x 4  -  60s",
+        6: "MEDIUM  -  6 x 6  -  120s",
+        10: "HARD  -  10 x 10  -  300s"
+    }
+
+    mouse = pygame.mouse.get_pos()
+
+    for n, rect in difficulty_buttons.items():
+
+        hover = rect.collidepoint(mouse)
+
+        pygame.draw.rect(
+            screen,
+            BACK_BORDER if hover else BACK,
+            rect,
+            border_radius=12
+        )
+
+        draw_centered(
+            names[n],
+            font,
+            WHITE,
+            rect.centery
+        )
+
+    hover = leaderboard_button.collidepoint(mouse)
+
+    pygame.draw.rect(
+        screen,
+        (135, 95, 35) if hover else (100, 75, 35),
+        leaderboard_button,
+        border_radius=12
+    )
+
+    draw_centered(
+        "LEADERBOARD  🏆",
+        font,
+        WHITE,
+        leaderboard_button.centery
+    )
+
+    draw_centered(
+        "Press L to see leaderboard",
+        small_font,
+        GRAY,
+        720
+    )
+
+
+# ==================================================
+# LEADERBOARD SCREEN
+# ==================================================
+
+def draw_leaderboard():
+
+    screen.fill(BG)
+
+    draw_centered(
+        "LEADERBOARD",
+        big_font,
+        GOLD,
+        65
+    )
+
+    draw_centered(
+        "TOP 10 PLAYERS",
+        small_font,
+        GRAY,
+        115
+    )
+
+    # Three difficulty sections
+    section_y = 155
+
+    for n in SIZES:
+
+        draw_centered(
+            f"{n} x {n}  -  {['EASY', 'MEDIUM', 'HARD'][SIZES.index(n)]}",
+            font,
+            GREEN,
+            section_y
+        )
+
+        section_y += 38
+
+        records = leaderboard[str(n)]
+
+        if not records:
+
+            draw_centered(
+                "No records yet!",
+                small_font,
+                GRAY,
+                section_y
+            )
+
+            section_y += 35
+
+        else:
+
+            for rank, record in enumerate(records[:5], 1):
+
+                name = str(record.get("name", "Player"))[:12]
+                seconds = record.get("time", 0)
+                player_moves = record.get("moves", 0)
+
+                line = (
+                    f"{rank}. {name:<12} "
+                    f"{seconds}s  |  {player_moves} moves"
+                )
+
+                draw_centered(
+                    line,
+                    small_font,
+                    GOLD if rank == 1 else WHITE,
+                    section_y
+                )
+
+                section_y += 29
+
+        section_y += 22
+
+    draw_centered(
+        "ESC: Back to menu",
+        small_font,
+        GRAY,
+        765
+    )
+
+
+# ==================================================
+# GAME SCREEN
+# ==================================================
 
 def draw_game():
+
     screen.fill(BG)
 
-    now = end_time if end_time else pygame.time.get_ticks()
-    secs = (now - start_time) // 1000
-    screen.blit(font.render(f"Moves: {moves}", True, WHITE), (20, 25))
-    t = font.render(f"Time: {secs}s", True, WHITE)
-    screen.blit(t, (W - 20 - t.get_width(), 25))
-    draw_centered("R restart | ESC menu | M music", small_font, GRAY, 38)
+    now = (
+        end_time
+        if end_time is not None
+        else pygame.time.get_ticks()
+    )
 
-    radius = int(CARD * 0.1)
+    elapsed = (now - start_time) // 1000
+
+    remaining = max(0, time_limit - elapsed)
+
+    # Header
+    draw_text(
+        f"Player: {player_name[:12]}",
+        15,
+        12,
+        WHITE,
+        small_font
+    )
+
+    draw_text(
+        f"Moves: {moves}",
+        15,
+        48,
+        WHITE,
+        small_font
+    )
+
+    timer_color = RED if remaining <= 10 else GREEN
+
+    timer_text = font.render(
+        f"{remaining}s",
+        True,
+        timer_color
+    )
+
+    screen.blit(
+        timer_text,
+        (W - timer_text.get_width() - 20, 25)
+    )
+
+    # Cards
     for i, card in enumerate(cards):
-        if card is None:
-            continue
+
         rect = card_rect(i)
+
+        radius = max(2, int(CARD * 0.08))
+
         if card["matched"]:
-            pygame.draw.rect(screen, MATCHED, rect, border_radius=radius)
-            draw_symbol(card["kind"], tuple(v // 2 for v in card["color"]), rect)
+
+            pygame.draw.rect(
+                screen,
+                MATCHED,
+                rect,
+                border_radius=radius
+            )
+
+            draw_emoji(card["emoji"], rect)
+
         elif card["revealed"]:
-            pygame.draw.rect(screen, FACE, rect, border_radius=radius)
-            draw_symbol(card["kind"], card["color"], rect)
+
+            pygame.draw.rect(
+                screen,
+                FACE,
+                rect,
+                border_radius=radius
+            )
+
+            draw_emoji(card["emoji"], rect)
+
         else:
-            pygame.draw.rect(screen, BACK, rect, border_radius=radius)
-            pygame.draw.rect(screen, BACK_BORDER, rect, 4, border_radius=radius)
 
-    if end_time:
-        overlay = pygame.Surface((W, H), pygame.SRCALPHA)
-        overlay.fill((0, 0, 0, 170))
+            pygame.draw.rect(
+                screen,
+                BACK,
+                rect,
+                border_radius=radius
+            )
+
+            pygame.draw.rect(
+                screen,
+                BACK_BORDER,
+                rect,
+                2,
+                border_radius=radius
+            )
+
+    # End screen
+    if end_time is not None:
+
+        overlay = pygame.Surface(
+            (W, H),
+            pygame.SRCALPHA
+        )
+
+        overlay.fill((0, 0, 0, 205))
+
         screen.blit(overlay, (0, 0))
-        draw_centered("You won!", big_font, WHITE, H // 2 - 50)
-        draw_centered(f"{moves} moves in {secs}s", font, WHITE, H // 2 + 10)
-        draw_centered("R: play again | ESC: menu", font, WHITE, H // 2 + 55)
+
+        if game_result == "win":
+
+            draw_centered(
+                "YOU WON!",
+                big_font,
+                GREEN,
+                H // 2 - 65
+            )
+
+            draw_centered(
+                "Score saved to leaderboard!",
+                small_font,
+                GOLD,
+                H // 2 - 15
+            )
+
+        else:
+
+            draw_centered(
+                "TIME'S UP!",
+                big_font,
+                RED,
+                H // 2 - 65
+            )
+
+        draw_centered(
+            f"Player: {player_name}",
+            font,
+            WHITE,
+            H // 2 + 30
+        )
+
+        draw_centered(
+            f"Moves: {moves}",
+            font,
+            WHITE,
+            H // 2 + 75
+        )
+
+        draw_centered(
+            "R: Play again | ESC: Menu",
+            small_font,
+            WHITE,
+            H // 2 + 130
+        )
 
 
-# =====================================================
-#                       حلقه‌ی اصلی
-# =====================================================
-def start(n):
-    global state
-    new_game(n)
-    state = "play"
-
+# ==================================================
+# MAIN LOOP
+# ==================================================
 
 running = True
+
 while running:
+
     for event in pygame.event.get():
+
         if event.type == pygame.QUIT:
+
             running = False
 
         elif event.type == pygame.KEYDOWN:
-            if event.key == pygame.K_m:
-                toggle_music()
-            elif state == "menu":
-                for n, key in [(2, pygame.K_2), (4, pygame.K_4), (5, pygame.K_5)]:
-                    if event.key == key:
-                        start(n)
-            elif state == "play":
-                if event.key == pygame.K_r:
-                    new_game()
+
+            # MENU
+            if state == "menu":
+
+                if name_active:
+
+                    if event.key == pygame.K_BACKSPACE:
+
+                        player_name = player_name[:-1]
+
+                    elif event.key == pygame.K_RETURN:
+
+                        name_active = False
+
+                    elif event.unicode.isprintable():
+
+                        if len(player_name) < 16:
+                            player_name += event.unicode
+
+                if event.key == pygame.K_l:
+
+                    state = "leaderboard"
+
                 elif event.key == pygame.K_ESCAPE:
+
+                    name_active = False
+
+                elif not name_active:
+
+                    if event.key == pygame.K_4:
+                        start_game(4)
+
+                    elif event.key == pygame.K_6:
+                        start_game(6)
+
+                    elif event.key == pygame.K_0:
+                        start_game(10)
+
+            # GAME
+            elif state == "play":
+
+                if event.key == pygame.K_r:
+
+                    new_game(N)
+
+                elif event.key == pygame.K_ESCAPE:
+
+                    state = "menu"
+                    name_active = False
+
+            # LEADERBOARD
+            elif state == "leaderboard":
+
+                if event.key == pygame.K_ESCAPE:
+
                     state = "menu"
 
-        elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-            if state == "menu":
-                for n, rect in zip(SIZES, BUTTONS):
-                    if rect.collidepoint(event.pos):
-                        start(n)
-            elif state == "play" and not end_time:
-                for i in range(len(cards)):
-                    if card_rect(i).collidepoint(event.pos):
-                        click_card(i)
-                        break
+        # MOUSE
+        elif event.type == pygame.MOUSEBUTTONDOWN:
 
-    # برگردوندن دو کارت اشتباه بعد از تأخیر
-    if state == "play" and second is not None and pygame.time.get_ticks() >= hide_at:
+            if event.button == 1:
+
+                if state == "menu":
+
+                    if name_box.collidepoint(event.pos):
+
+                        name_active = True
+
+                    else:
+
+                        name_active = False
+
+                        for n, rect in difficulty_buttons.items():
+
+                            if rect.collidepoint(event.pos):
+                                start_game(n)
+
+                        if leaderboard_button.collidepoint(event.pos):
+
+                            state = "leaderboard"
+
+                elif state == "play" and end_time is None:
+
+                    for i in range(len(cards)):
+
+                        if card_rect(i).collidepoint(event.pos):
+
+                            click_card(i)
+                            break
+
+    # ==================================================
+    # HIDE WRONG CARDS
+    # ==================================================
+
+    if (
+        state == "play"
+        and second is not None
+        and pygame.time.get_ticks() >= hide_at
+    ):
+
         cards[first]["revealed"] = False
         cards[second]["revealed"] = False
-        first = second = None
+
+        first = None
+        second = None
+
+    # ==================================================
+    # TIMER
+    # ==================================================
+
+    if state == "play" and end_time is None:
+
+        elapsed = (
+            pygame.time.get_ticks() - start_time
+        ) // 1000
+
+        if elapsed >= time_limit:
+
+            end_time = pygame.time.get_ticks()
+            game_result = "lose"
+
+            first = None
+            second = None
+
+    # ==================================================
+    # DRAW
+    # ==================================================
 
     if state == "menu":
+
         draw_menu()
-    else:
+
+    elif state == "play":
+
         draw_game()
 
+    elif state == "leaderboard":
+
+        draw_leaderboard()
+
     pygame.display.flip()
+
     clock.tick(60)
+
 
 pygame.quit()
